@@ -13,7 +13,7 @@ from setuptools import setup, find_packages		# 没有这个库的可以通过pip
 
 setup(
     name = "pyormx",
-    version = "0.1.0",
+    version = "0.2.0",
     keywords = ("pip", "pathtool","timetool", "magetool", "mage"),							
     description = "python简易ORM框架",
     long_description = "python简易ORM框架",

@@ -1,6 +1,6 @@
 ## 一、安装
 ```shell
-pip install fcorm
+pip install pyormx
 ```
 ## 二、测试代码
 ### 1.新建测试数据库

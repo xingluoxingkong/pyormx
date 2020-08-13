@@ -120,6 +120,9 @@ def dataToJson(data):
 
         @return list, dict 或 str类型
     """
+    from collections import OrderedDict
+    if isinstance(data, OrderedDict):
+        data = dict(data)
     from decimal import Decimal
     if data == None or isinstance(data, int) or isinstance(data, float) or isinstance(data, bool):
         return data
@@ -131,9 +134,10 @@ def dataToJson(data):
                 return data
         return data
     elif isinstance(data, list) or isinstance(data, tuple):
+        newList = []
         for item in data:
-            item = dataToJson(item)
-        return data
+            newList.append(dataToJson(item))
+        return newList
     elif isinstance(data, dict):
         for k, v in data.items():
             data[k] = dataToJson(v)

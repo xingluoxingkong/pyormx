@@ -6,20 +6,44 @@ __all__ = ['Orm']
 
 _log = logging.getLogger()
 
+_POSTGRE = 'psycopg2'
+_MYSQL = 'mysql'
+
+
 class Orm(object):
-    def __init__(self, conn, tableName, keyProperty = PRIMARY_KEY, auto_commit = True):
+    def __init__(self, conn, tableName, keyProperty=PRIMARY_KEY, auto_commit=True):
         ''' 操作数据库，默认自动提交；如设置为手动提交请自己使用conn.commit()提交
         --
-    
             @param conn: 数据库连接
             @param tableName: 表名
             @param keyProperty: 主键字段名。可以不填，不填默认主键名为id
             @param auto_commit: 自动提交
         '''
+        if 'psycopg2' in str(type(conn)):
+            self.dbType = _POSTGRE
+        elif 'mysql' in str(type(conn)):
+            self.dbType = _MYSQL
+        else:
+            try:
+                if 'psycopg2' in conn._pool._creator.__name__:
+                    self.dbType = _POSTGRE
+                elif 'mysql' in conn._pool._creator.__name__:
+                    self.dbType = _MYSQL
+                else:
+                    raise Exception('数据库类型暂不支持！')
+            except Exception as e:
+                raise Exception('数据库类型暂不支持！')
         # 数据库连接
         self.conn = conn
         # 表名
-        self.tableName = tableName
+        if tableName.startswith('`') and tableName.endswith('`'):
+            self.tableName = tableName
+        elif '.' in tableName:
+            tableNameSplit = tableName.split('.')
+            self.tableName = '`' + \
+                tableNameSplit[0] + '`.`' + tableNameSplit[1] + '`'
+        else:
+            self.tableName = '`' + tableName + '`'
         # 主键名
         self.keyProperty = keyProperty
         # 主键策略
@@ -39,7 +63,7 @@ class Orm(object):
         self.distinct = ''
         # 自动提交
         self.auto_commit = auto_commit
-    
+
     def setPrimaryGenerator(self, generator):
         ''' 设置表的主键生成策略，不设置则默认使用数据库自增主键
         --
@@ -51,7 +75,7 @@ class Orm(object):
         return self
 
     #################################### 新增操作 ####################################
-    def insertData(self, *args):
+    def insertData(self, *args, **kw):
         ''' 向数据库中写入数据
         --
             @example
@@ -60,11 +84,16 @@ class Orm(object):
                 orm.insertData([{'name':'张三', 'age':18}, {'name':'李四', 'age':19}])
                 orm.insertData(['name', 'age'], [{'name':'张三', 'age':18}, {'name':'李四', 'age':19}])
                 orm.insertData(['name', 'age'], {'name':'张三', 'age':18})
-            
+
             @param args: 要写入的数据，可以有以下三种形式：
                         1. dict: 单条数据key,value键值对形式
                         2. list, list: 两个数组形式。第一个数据传入数据库中对应的字段。第二个数组传入需要写入的数据，可以是单条数据（一维数组），也可以是多条数据（二维数组）
                         3. list: 多条数据，数组里面是多个字典，每个字典代表一条数据
+            
+            以下参数仅在插入单条数据时有效：
+            @param kw.ignore: 不存在则新增，存在则不改变
+            @param kw.replace: 不存在则新增，存在则删除并新增
+            @param kw.update: 不存在则新增，存在则更新
         '''
         n = len(args)
         if n == 0:
@@ -73,7 +102,7 @@ class Orm(object):
             if isinstance(args[0], list):
                 return self.insertDictList(args[0])
             elif isinstance(args[0], dict):
-                return self.insertOne(args[0])
+                return self.insertOne(args[0], **kw)
             else:
                 return -1
         elif n == 2:
@@ -81,41 +110,77 @@ class Orm(object):
         else:
             return -1
 
-    def insertOne(self, data):
-        ''' 向数据库写入一条数据
+    def insertOne(self, data, ignore=False, replace=False, update=False):
+        ''' 向数据库写入一条数据，返回自增id（主键必须是自增并且名字为id），或者受影响的条数（没有自增id）
         --
             @example
                 orm.insertOne({'name':'张三', 'age':18})
-                
+
             @param data: 要插入的数据 字典格式
+            @param ignore: 不存在则新增，存在则不改变
+            @param replace: 不存在则新增，存在则删除并新增
+            @param update: 不存在则新增，存在则更新
         '''
         if not data:
             raise Exception('数据为空！')
 
+        if ignore and replace and update:
+            raise Exception('ignore,replace和update只能有一个为true')
+
+        if ignore:
+            ignore = 'IGNORE'
+        else:
+            ignore = ''
+
+        if replace:
+            replace = 'REPLACE'
+        else:
+            replace = ''
+
         cursor = self.conn.cursor()
         try:
             # 如果主键不是自增，则生成主键
-            if self.generator != AUTO_INCREMENT_KEYS:   
-                if self.keyProperty not in data or data[self.keyProperty] == 0:    # 传入的data里面没有主键或者主键值为0
+            if self.generator != AUTO_INCREMENT_KEYS:
+                # 传入的data里面没有主键或者主键值为0
+                if self.keyProperty not in data or data[self.keyProperty] == 0:
                     data[self.keyProperty] = self.generator()
-            
+
             keys, ps, values = fieldSplit(data)
-            sql = 'INSERT INTO `{}`({}) VALUES({})'.format(self.tableName, keys, ps)
+            sql = '{} INSERT {} INTO {}({}) VALUES({})'.format(replace, ignore,
+                                                               self.tableName, keys, ps)
+            if update:
+                fieldStr, values2 = fieldStrAndPer(data)
+                sql += ' ON DUPLICATE KEY UPDATE {}'.format(fieldStr)
+                values.extend(values2)
+
+            if self.dbType == _POSTGRE and self.keyProperty == PRIMARY_KEY:
+                sql += ' RETURNING {}'.format(self.keyProperty)
+            sql = self._encodeSql(sql)
             _log.info('执行sql语句：{}；值：{}'.format(sql, values))
-            cursor.execute(sql, values)
-            lastId = cursor.lastrowid
-            if self.auto_commit:
-                self.conn.commit()
-            return lastId
+            affectedRows = cursor.execute(sql, values)
+            if self.keyProperty == PRIMARY_KEY:
+                lastId = cursor.lastrowid
+                # 获取postgre的自增id
+                if self.dbType == _POSTGRE:
+                    idRow = cursor.fetchone()
+                    if idRow:
+                        lastId = idRow[self.keyProperty]
+                if self.auto_commit:
+                    self.conn.commit()
+                return lastId
+            else:
+                if self.auto_commit:
+                    self.conn.commit()
+                return affectedRows
         except Exception as e:
             _log.error(e)
             self.conn.rollback()
             raise Exception('insertOne error; values:{}'.format(data))
         finally:
             cursor.close()
-    
+
     def insertMany(self, keys, data):
-        ''' 插入一组数据，注意：返回的是第一条数据的ID
+        ''' 插入一组数据，可以指定字段名，返回自增id（单条数据且有自增id）或者受影响的条数
         --
             @example
                 orm.insertMany(['name', 'age'], [{'name':'张三', 'age':18}, {'name':'李四', 'age':19}])
@@ -137,15 +202,15 @@ class Orm(object):
                     if k in data:
                         dataList.append(dataToStr(data[k]))
                         columns.append(k)
-            
+
             elif isinstance(data, list):
                 if isinstance(data[0], list):
                     for l in data:
                         d = list(map(dataToStr, l))
                         dataList.append(d)
                     columns = keys
-                elif isinstance(data[0], dict): 
-                    sign = True   
+                elif isinstance(data[0], dict):
+                    sign = True
                     for d in data:
                         dd = []
                         for k in keys:
@@ -157,7 +222,7 @@ class Orm(object):
                         if dd:
                             dataList.append(dd)
 
-            if self.generator != AUTO_INCREMENT_KEYS: 
+            if self.generator != AUTO_INCREMENT_KEYS:
                 if self.keyProperty not in columns:
                     columns.append(self.keyProperty)
                     if isinstance(dataList[0], list):
@@ -166,25 +231,44 @@ class Orm(object):
                     else:
                         dataList.append(self.generator())
 
-            sql = 'INSERT INTO `{}`({}) VALUES({})'.format(self.tableName, joinList(columns), pers(len(columns)))
+            sql = 'INSERT  INTO {}({}) VALUES({})'.format(
+                self.tableName, joinList(columns), pers(len(columns)))
+
+            sql = self._encodeSql(sql)
             _log.info('执行sql语句：{}；值：{}'.format(sql, dataList))
+            affectedRows = 0
             if isinstance(dataList[0], list):
-                cursor.executemany(sql, dataList)
+                affectedRows = cursor.executemany(sql, dataList)
+                if self.auto_commit:
+                    self.conn.commit()
+                return affectedRows
             else:
-                cursor.execute(sql, dataList)
-            lastId = cursor.lastrowid
-            if self.auto_commit:
-                self.conn.commit()
-            return lastId
+                if self.dbType == _POSTGRE and self.keyProperty == PRIMARY_KEY:
+                    sql += ' RETURNING {}'.format(self.keyProperty)
+                affectedRows = cursor.execute(sql, dataList)
+                if self.keyProperty == PRIMARY_KEY:
+                    lastId = cursor.lastrowid
+                    # 获取postgre的自增id
+                    if self.dbType == _POSTGRE:
+                        idRow = cursor.fetchone()
+                        if idRow:
+                            lastId = idRow[self.keyProperty]
+                    if self.auto_commit:
+                        self.conn.commit()
+                    return lastId
+                else:
+                    if self.auto_commit:
+                        self.conn.commit()
+                    return affectedRows
         except Exception as e:
             _log.error(e)
             self.conn.rollback()
             raise Exception('insertList error; values:{}'.format(dataList))
         finally:
             cursor.close()
-    
+
     def insertDictList(self, dataList):
-        ''' 插入一组数据，注意：返回的是第一条数据的ID
+        ''' 插入一组数据，返回受影响的条数
         --
             @example
                 orm.insertDictList([{'name':'张三', 'age':18}, {'name':'李四', 'age':19}])
@@ -201,19 +285,21 @@ class Orm(object):
             ps = ''
 
             for data in dataList:
-                if self.keyProperty not in data or data[self.keyProperty] == 0:    # 没有主键
+                # 没有主键
+                if self.keyProperty not in data or data[self.keyProperty] == 0:
                     if self.generator != AUTO_INCREMENT_KEYS:   # 如果主键不是自增，则生成主键
                         data[self.keyProperty] = self.generator
                 keys, ps, vs = fieldSplit(data)
                 values.append(vs)
-            
-            sql = 'INSERT INTO `{}`({}) VALUES({})'.format(self.tableName, keys, ps)
+
+            sql = ' INSERT INTO {}({}) VALUES({})'.format(
+                self.tableName, keys, ps)
+            sql = self._encodeSql(sql)
             _log.info('执行sql语句：{}；值：{}'.format(sql, values))
-            cursor.executemany(sql, values)
-            lastId = cursor.lastrowid
+            affectedRows = cursor.executemany(sql, values)
             if self.auto_commit:
                 self.conn.commit()
-            return lastId
+            return affectedRows
         except Exception as e:
             _log.error(e)
             self.conn.rollback()
@@ -222,7 +308,7 @@ class Orm(object):
             cursor.close()
 
     #################################### 更新操作 ####################################
-    def updateByPrimaryKey(self, data, primaryValue = None, keys = None):
+    def updateByPrimaryKey(self, data, primaryValue=None, keys=None):
         ''' 根据主键更新数据
         --
             @param data: 要更新的数据，字典格式
@@ -231,10 +317,10 @@ class Orm(object):
         '''
         if not primaryValue:
             primaryValue = data.pop(self.keyProperty, None)
-        
+
         if not primaryValue:
             raise Exception('未传入主键值！')
-        
+
         if not data:
             raise Exception('数据为空！')
 
@@ -249,7 +335,9 @@ class Orm(object):
         try:
             fieldStr, values = fieldStrAndPer(data)
             values.append(primaryValue)
-            sql = 'UPDATE `{}` SET {} WHERE `{}`=%s'.format(self.tableName, fieldStr, self.keyProperty)
+            sql = 'UPDATE {} SET {} WHERE `{}`=%s'.format(
+                self.tableName, fieldStr, self.keyProperty)
+            sql = self._encodeSql(sql)
             _log.info('执行sql语句：{}；值：{}'.format(sql, values))
             res = cursor.execute(sql, values)
             if self.auto_commit:
@@ -261,8 +349,8 @@ class Orm(object):
             raise Exception('updateByPrimaryKey error; values:{}'.format(data))
         finally:
             cursor.close()
-    
-    def updateByExample(self, data, example, keys = None):
+
+    def updateByExample(self, data, example, keys=None):
         ''' 根据Example条件更新
         --
             @param data: 要更新的数据，字典格式
@@ -271,7 +359,7 @@ class Orm(object):
         '''
         if not example:
             raise Exception('未传入更新条件！')
-        
+
         if not data:
             raise Exception('数据为空！')
 
@@ -287,7 +375,9 @@ class Orm(object):
             whereStr, values1 = example.whereBuilder()
             fieldStr, values2 = fieldStrAndPer(data)
             values2.extend(values1)
-            sql = 'UPDATE `{}` SET {} WHERE {}'.format(self.tableName, fieldStr, whereStr)
+            sql = 'UPDATE {} SET {} WHERE {}'.format(
+                self.tableName, fieldStr, whereStr)
+            sql = self._encodeSql(sql)
             _log.info('执行sql语句：{}；值：{}'.format(sql, values2))
             res = cursor.execute(sql, values2)
             if self.auto_commit:
@@ -299,9 +389,9 @@ class Orm(object):
             raise Exception('updateByExample error; values:{}'.format(data))
         finally:
             cursor.close()
-        
+
     #################################### 查询操作 ####################################
-    def orderByClause(self, key, clause = 'DESC'):
+    def orderByClause(self, key, clause='DESC'):
         ''' ORDER BY key clause
         --
             @param key 排序字段
@@ -317,7 +407,7 @@ class Orm(object):
         else:
             self.orderByStr = self.orderByStr + ' , ' + key + ' ' + clause + ' '
         return self
-    
+
     def groupByClause(self, key):
         ''' GROUP BY key clause
         --
@@ -333,14 +423,14 @@ class Orm(object):
         else:
             self.groupByStr = self.groupByStr + ' , ' + key
         return self
-    
+
     def havingByExample(self, example):
         ''' HAVING
         --
         '''
         self.havingStr, self.havingValues = example.whereBuilder()
         return self
-    
+
     def join(self, tName, onStr):
         ''' 多表连接查询，内连接
         --
@@ -367,7 +457,7 @@ class Orm(object):
         '''
         self.joinStr = self.joinStr + ' RIGHT JOIN ' + tName + ' ON ' + onStr + ' '
         return self
-    
+
     def setDistinct(self):
         ''' 设置去重
         '''
@@ -420,14 +510,16 @@ class Orm(object):
 
         try:
             strDict = {
-                'distinctStr':self.distinct,
+                'distinctStr': self.distinct,
                 'propertiesStr': self.properties,
                 'tableName': self.tableName,
                 'joinStr': self.joinStr,
                 'groupByStr': self.groupByStr,
                 'orderByStr': self.orderByStr
             }
-            sql = '''SELECT {distinctStr} {propertiesStr} FROM {tableName} {joinStr} {groupByStr} {orderByStr}'''.format(**strDict)
+            sql = '''SELECT {distinctStr} {propertiesStr} FROM {tableName} {joinStr} {groupByStr} {orderByStr}'''.format(
+                **strDict)
+            sql = self._encodeSql(sql)
             _log.info('执行sql语句：{}'.format(sql))
             cursor.execute(sql)
             res = cursor.fetchall()
@@ -446,23 +538,29 @@ class Orm(object):
         --
             @param primaryValue: 主键值
         '''
+        try:
+            import psycopg2
+        except Exception as e:
+            pass
+
         cursor = self.conn.cursor()
 
         try:
             strDict = {
-                'distinctStr':self.distinct,
+                'distinctStr': self.distinct,
                 'propertiesStr': self.properties,
                 'tableName': self.tableName,
                 'joinStr': self.joinStr,
-                'whereStr':'`{}`.`{}`=%s'.format(self.tableName, self.keyProperty),
+                'whereStr': '{}.`{}`=%s'.format(self.tableName, self.keyProperty),
                 'groupByStr': self.groupByStr,
                 'orderByStr': self.orderByStr
             }
             sql = '''SELECT {distinctStr} {propertiesStr} FROM {tableName} {joinStr} 
                 WHERE {whereStr} {groupByStr} {orderByStr}
                 '''.format(**strDict)
+            sql = self._encodeSql(sql)
             _log.info('执行sql语句：{}；值：{}'.format(sql, primaryValue))
-            cursor.execute(sql, primaryValue)
+            cursor.execute(sql, [primaryValue])
             res = cursor.fetchone()
             if self.auto_commit:
                 self.conn.commit()
@@ -470,10 +568,11 @@ class Orm(object):
         except Exception as e:
             _log.error(e)
             self.conn.rollback()
-            raise Exception('selectByPrimaeyKey error; values:{}'.format(primaryValue))
+            raise Exception(
+                'selectByPrimaeyKey error; values:{}'.format(primaryValue))
         finally:
             cursor.close()
-    
+
     def selectByExample(self, example):
         ''' 根据Example条件进行查询
         --
@@ -483,7 +582,7 @@ class Orm(object):
         try:
             whereStr, values = example.whereBuilder()
             strDict = {
-                'distinctStr':self.distinct,
+                'distinctStr': self.distinct,
                 'propertiesStr': self.properties,
                 'tableName': self.tableName,
                 'joinStr': self.joinStr,
@@ -494,6 +593,7 @@ class Orm(object):
             sql = '''SELECT {distinctStr} {propertiesStr} FROM {tableName} {joinStr} 
                 WHERE {whereStr} {groupByStr} {orderByStr}
                 '''.format(**strDict)
+            sql = self._encodeSql(sql)
             _log.info('执行sql语句：{}；值：{}'.format(sql, values))
             cursor.execute(sql, values)
             res = cursor.fetchall()
@@ -508,8 +608,8 @@ class Orm(object):
             raise Exception('selectByExample error; values:{}'.format(example))
         finally:
             cursor.close()
-    
-    def selectTransactByExample(self, transactProperties, example, transactName = '', transact = 'COUNT'):
+
+    def selectTransactByExample(self, transactProperties, example, transactName='', transact='COUNT'):
         ''' 根据Example条件聚合查询
         --
             @param transactProperties: 统计字段
@@ -522,7 +622,7 @@ class Orm(object):
         try:
             whereStr, values = example.whereBuilder()
             strDict = {
-                'distinctStr':self.distinct,
+                'distinctStr': self.distinct,
                 'propertiesStr': self.properties,
                 'countStr': '{}({}) {}'.format(transact, transactProperties, transactName),
                 'tableName': self.tableName,
@@ -534,6 +634,7 @@ class Orm(object):
             sql = '''SELECT {distinctStr} {propertiesStr} , {countStr} FROM {tableName} {joinStr} 
                 WHERE {whereStr} {groupByStr} {orderByStr}
                 '''.format(**strDict)
+            sql = self._encodeSql(sql)
             _log.info('执行sql语句：{}；值：{}'.format(sql, values))
             cursor.execute(sql, values)
             res = cursor.fetchall()
@@ -543,11 +644,12 @@ class Orm(object):
         except Exception as e:
             _log.error(e)
             self.conn.rollback()
-            raise Exception('selectTransactByExample error; values:{}'.format(transactProperties))
+            raise Exception(
+                'selectTransactByExample error; values:{}'.format(transactProperties))
         finally:
             cursor.close()
-    
-    def selectGroupHavingByExample(self, transactProperties, example, transactName = '', transact = 'COUNT'):
+
+    def selectGroupHavingByExample(self, transactProperties, example, transactName='', transact='COUNT'):
         ''' 根据Example条件聚合查询
         --
             @param transactProperties: 统计字段
@@ -563,7 +665,7 @@ class Orm(object):
         try:
             whereStr, values = example.whereBuilder()
             strDict = {
-                'distinctStr':self.distinct,
+                'distinctStr': self.distinct,
                 'propertiesStr': self.properties,
                 'countStr': '{}({}) {}'.format(transact, transactProperties, transactName),
                 'tableName': self.tableName,
@@ -578,6 +680,7 @@ class Orm(object):
             sql = '''SELECT {distinctStr} {propertiesStr} , {countStr} FROM {tableName} {joinStr} 
                 WHERE {whereStr} {groupByStr} {havingStr} {orderByStr}
                 '''.format(**strDict)
+            sql = self._encodeSql(sql)
             _log.info('执行sql语句：{}；值：{}'.format(sql, values))
             cursor.execute(sql, values)
             res = cursor.fetchall()
@@ -587,11 +690,12 @@ class Orm(object):
         except Exception as e:
             _log.error(e)
             self.conn.rollback()
-            raise Exception('selectGroupHavingByExample error; values:{}'.format(transactProperties))
+            raise Exception(
+                'selectGroupHavingByExample error; values:{}'.format(transactProperties))
         finally:
             cursor.close()
-    
-    def selectPageAll(self, page = 1, pageNum = 10):
+
+    def selectPageAll(self, page=1, pageNum=10):
         ''' 分页查询
         --
         '''
@@ -601,16 +705,16 @@ class Orm(object):
 
         try:
             strDict = {
-                'propertiesStr': '`{}`.`{}`'.format(self.tableName, self.keyProperty),
+                'propertiesStr': '{}.`{}`'.format(self.tableName, self.keyProperty),
                 'tableName': self.tableName,
                 'joinStr': self.joinStr,
-                'groupByStr': self.groupByStr,
-                'orderByStr': self.orderByStr
+                # 'groupByStr': self.groupByStr,
+                # 'orderByStr': self.orderByStr
             }
-            
+
             sql = '''SELECT COUNT({propertiesStr}) num FROM {tableName} {joinStr} 
-                    {groupByStr} {orderByStr}
                     '''.format(**strDict)
+            sql = self._encodeSql(sql)
             _log.info('执行sql语句：{}'.format(sql))
             cursor.execute(sql)
             numRes = cursor.fetchone()
@@ -618,19 +722,20 @@ class Orm(object):
 
             if num == 0 or num < startId:
                 return num, []
-            
+
             strDict = {
-                'distinctStr':self.distinct,
+                'distinctStr': self.distinct,
                 'propertiesStr': self.properties,
                 'tableName': self.tableName,
                 'joinStr': self.joinStr,
                 'groupByStr': self.groupByStr,
                 'orderByStr': self.orderByStr,
-                'limitStr':'LIMIT {}, {}'.format(startId, pageNum)
+                'limitStr': self._limit(startId, pageNum)
             }
             sql = '''SELECT {distinctStr} {propertiesStr} FROM {tableName} {joinStr} 
                     {groupByStr} {orderByStr} {limitStr}
                     '''.format(**strDict)
+            sql = self._encodeSql(sql)
             _log.info('执行sql语句：{}'.format(sql))
             cursor.execute(sql)
             res = cursor.fetchall()
@@ -644,7 +749,7 @@ class Orm(object):
         finally:
             cursor.close()
 
-    def selectPageByExample(self, example, page = 1, pageNum = 10):
+    def selectPageByExample(self, example, page=1, pageNum=10):
         ''' 根据Example条件分页查询
         --
         '''
@@ -655,17 +760,18 @@ class Orm(object):
         try:
             whereStr, values = example.whereBuilder()
             strDict = {
-                'propertiesStr': '`{}`.`{}`'.format(self.tableName, self.keyProperty),
+                'propertiesStr': '{}.`{}`'.format(self.tableName, self.keyProperty),
                 'tableName': self.tableName,
                 'joinStr': self.joinStr,
                 'whereStr': whereStr,
-                'groupByStr': self.groupByStr,
-                'orderByStr': self.orderByStr
+                # 'groupByStr': self.groupByStr,
+                # 'orderByStr': self.orderByStr
             }
-            
+
             sql = '''SELECT COUNT({propertiesStr}) num FROM {tableName} {joinStr} 
-                    WHERE {whereStr} {groupByStr} {orderByStr}
+                    WHERE {whereStr}
                     '''.format(**strDict)
+            sql = self._encodeSql(sql)
             _log.info('执行sql语句：{}；值：{}'.format(sql, values))
             cursor.execute(sql, values)
             numRes = cursor.fetchone()
@@ -673,21 +779,21 @@ class Orm(object):
 
             if num == 0 or num < startId:
                 return num, []
-            
+
             strDict = {
-                'distinctStr':self.distinct,
+                'distinctStr': self.distinct,
                 'propertiesStr': self.properties,
                 'tableName': self.tableName,
                 'joinStr': self.joinStr,
                 'whereStr': whereStr,
                 'groupByStr': self.groupByStr,
                 'orderByStr': self.orderByStr,
-                
-                'limitStr':'LIMIT {}, {}'.format(startId, pageNum)
+                'limitStr': self._limit(startId, pageNum)
             }
             sql = '''SELECT {distinctStr} {propertiesStr} FROM {tableName} {joinStr} 
                     WHERE {whereStr} {groupByStr} {orderByStr} {limitStr}
                     '''.format(**strDict)
+            sql = self._encodeSql(sql)
             _log.info('执行sql语句：{}；值：{}'.format(sql, values))
             cursor.execute(sql, values)
             res = cursor.fetchall()
@@ -697,7 +803,8 @@ class Orm(object):
         except Exception as e:
             _log.error(e)
             self.conn.rollback()
-            raise Exception('selectPageByExample error; values:{}'.format(example))
+            raise Exception(
+                'selectPageByExample error; values:{}'.format(example))
         finally:
             cursor.close()
 
@@ -705,25 +812,28 @@ class Orm(object):
     def deleteByPrimaryKey(self, primaryValue):
         ''' 根据主键删除 
         '''
-        
+
         if not primaryValue:
             raise Exception('未传入主键值！')
 
         cursor = self.conn.cursor()
         try:
-            sql = 'DELETE FROM `{}` WHERE `{}`=%s'.format(self.tableName, self.keyProperty)
+            sql = 'DELETE FROM {} WHERE `{}`=%s'.format(
+                self.tableName, self.keyProperty)
+            sql = self._encodeSql(sql)
             _log.info('执行sql语句：{}；值：{}'.format(sql, primaryValue))
-            res = cursor.execute(sql, primaryValue)
+            res = cursor.execute(sql, [primaryValue])
             if self.auto_commit:
                 self.conn.commit()
             return res
         except Exception as e:
             _log.error(e)
             self.conn.rollback()
-            raise Exception('deleteByPrimaryKey error; values:{}'.format(primaryValue))
+            raise Exception(
+                'deleteByPrimaryKey error; values:{}'.format(primaryValue))
         finally:
             cursor.close()
-            
+
     def deleteByExample(self, example):
         ''' 根据Example条件删除数据
         '''
@@ -733,7 +843,8 @@ class Orm(object):
         cursor = self.conn.cursor()
         try:
             whereStr, values = example.whereBuilder()
-            sql = 'DELETE FROM `{}` WHERE {}'.format(self.tableName, whereStr)
+            sql = 'DELETE FROM {} WHERE {}'.format(self.tableName, whereStr)
+            sql = self._encodeSql(sql)
             _log.info('执行sql语句：{}；值：{}'.format(sql, values))
             res = cursor.execute(sql, values)
             if self.auto_commit:
@@ -747,13 +858,14 @@ class Orm(object):
             cursor.close()
 
     #################################### 原生SQL操作 ####################################
-    def selectOneBySQL(self, sql, values = None):
+    def selectOneBySQL(self, sql, values=None):
         ''' 查询单个
         --
         '''
         cursor = self.conn.cursor()
 
         try:
+            sql = self._encodeSql(sql)
             _log.info('执行sql语句：{}；值：{}'.format(sql, values))
             if values:
                 cursor.execute(sql, values)
@@ -766,11 +878,12 @@ class Orm(object):
         except Exception as e:
             _log.error(e)
             self.conn.rollback()
-            raise Exception('selectOneBySQL error; sql:{} values:{}'.format(sql, values))
+            raise Exception(
+                'selectOneBySQL error; sql:{} values:{}'.format(sql, values))
         finally:
             cursor.close()
-    
-    def selectAllBySQL(self, sql, values = None):
+
+    def selectAllBySQL(self, sql, values=None):
         ''' 查询所有
         --
         '''
@@ -779,9 +892,9 @@ class Orm(object):
         try:
             _log.info('执行sql语句：{}；值：{}'.format(sql, values))
             if values:
-                cursor.execute(sql, values)
+                cursor.execute(self._encodeSql(sql), values)
             else:
-                cursor.execute(sql)
+                cursor.execute(self._encodeSql(sql))
             res = cursor.fetchall()
             if self.auto_commit:
                 self.conn.commit()
@@ -789,11 +902,12 @@ class Orm(object):
         except Exception as e:
             _log.error(e)
             self.conn.rollback()
-            raise Exception('selectAllBySQL error; sql:{} values:{}'.format(sql, values))
+            raise Exception(
+                'selectAllBySQL error; sql:{} values:{}'.format(sql, values))
         finally:
             cursor.close()
 
-    def executeBySQL(self, sql, values = None):
+    def executeBySQL(self, sql, values=None):
         ''' 根据sql进行更新删除或者新增操作， 不能用于执行查询操作，因为不会返回查询结果，查询使用selectAllBySQL或者selectOneBySQL
         --
             @param sql: sql语句
@@ -804,9 +918,9 @@ class Orm(object):
         try:
             _log.info('执行sql语句：{}；值：{}'.format(sql, values))
             if values:
-                cursor.execute(sql, values)
+                cursor.execute(self._encodeSql(sql), values)
             else:
-                cursor.execute(sql)
+                cursor.execute(self._encodeSql(sql))
 
             res = cursor.lastrowid
             if self.auto_commit:
@@ -815,15 +929,16 @@ class Orm(object):
         except Exception as e:
             _log.error(e)
             self.conn.rollback()
-            raise Exception('executeBySQL error; sql:{} values:{}'.format(sql, values))
+            raise Exception(
+                'executeBySQL error; sql:{} values:{}'.format(sql, values))
         finally:
             cursor.close()
-    
+
     #################################### 子查询 ####################################
 
-    
     #################################### 清除关闭 ####################################
-    def autoCommit(self, auto_commit = True):
+
+    def autoCommit(self, auto_commit=True):
         ''' 打开/关闭自动提交
         --
         '''
@@ -848,9 +963,28 @@ class Orm(object):
         # 是否去重
         self.distinct = ''
         return self
-    
+
     def close(self):
         ''' 关闭数据库连接
         --
         '''
         self.conn.close()
+
+    ###################################解决postgresql的兼容性问题#####################################
+
+    def _encodeSql(self, sql):
+        ''' 编码sql语句
+        --
+        '''
+        if self.dbType == _POSTGRE:
+            new_sql = sql.replace('`', '"')
+            # 如果是自增id，添加返回值
+            # if 'INSERT' in sql.upper() and self.keyProperty == PRIMARY_KEY:
+            #     new_sql += ' RETURNING {}'.format(self.keyProperty)
+            return new_sql
+        return sql
+
+    def _limit(self, startId, pageNum):
+        if self.dbType == _POSTGRE:
+            return 'LIMIT {} offset {}'.format(pageNum, startId)
+        return 'LIMIT {}, {}'.format(startId, pageNum)
