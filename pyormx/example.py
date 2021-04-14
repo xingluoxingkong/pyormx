@@ -150,6 +150,34 @@ class Example(object):
         '''
         self._append('OR', (key, values, 'IN'))
         return self
+    
+    def andIsNull(self, key):
+        ''' AND key IS NULL
+        --
+        '''
+        self._append('AND', (key, None, 'IS NULL'))
+        return self
+
+    def andIsNull(self, key):
+        ''' AND key IS NULL
+        --
+        '''
+        self._append('OR', (key, None, 'IS NULL'))
+        return self
+    
+    def andIsNotNull(self, key):
+        ''' AND key IS NOT NULL
+        --
+        '''
+        self._append('AND', (key, None, 'IS NOT NULL'))
+        return self
+
+    def andIsNotNull(self, key):
+        ''' AND key IS NOT NULL
+        --
+        '''
+        self._append('OR', (key, None, 'IS NOT NULL'))
+        return self
 
     def andNotInValues(self, key, values):
         ''' AND key NOT IN (value1, values...)
@@ -363,6 +391,9 @@ class Example(object):
             elif p.upper() == 'BETWEEN' or p.upper() == 'NOT BETWEEN':
                 whereStr = ' ' + k + ' ' + p.upper() + ' %s AND %s '
                 return whereStr, v
+            elif p.upper() == 'IS NULL' or p.upper() == 'IS NOT NULL':
+                whereStr = ' ' + k + ' ' + p.upper() + ' '
+                return whereStr, v
             else:
                 whereStr = ' ' + k + ' ' + p.upper() + ' %s '
                 return whereStr, v
@@ -390,11 +421,11 @@ class Example(object):
                 whereStr += s
             else:
                 whereStr += (' ' + self.orAnd[i - 1] + ' ' + s)
-
-            if isinstance(v, list):
-                values.extend(v)
-            else:
-                values.append(v)
+            if v:
+                if isinstance(v, list):
+                    values.extend(v)
+                else:
+                    values.append(v)
 
         return whereStr, values
 
