@@ -158,7 +158,7 @@ class Example(object):
         self._append('AND', (key, None, 'IS NULL'))
         return self
 
-    def andIsNull(self, key):
+    def orIsNull(self, key):
         ''' AND key IS NULL
         --
         '''
@@ -172,7 +172,7 @@ class Example(object):
         self._append('AND', (key, None, 'IS NOT NULL'))
         return self
 
-    def andIsNotNull(self, key):
+    def orIsNotNull(self, key):
         ''' AND key IS NOT NULL
         --
         '''
