@@ -421,7 +421,7 @@ class Example(object):
                 whereStr += s
             else:
                 whereStr += (' ' + self.orAnd[i - 1] + ' ' + s)
-            if v:
+            if v is not None:
                 if isinstance(v, list):
                     values.extend(v)
                 else:
