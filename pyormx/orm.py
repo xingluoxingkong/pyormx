@@ -214,7 +214,7 @@ class Orm(object):
                     for d in data:
                         dd = []
                         for k in keys:
-                            if k in data:
+                            if k in d:
                                 dd.append(dataToStr(d[k]))
                                 if sign:
                                     columns.append(k)
@@ -226,8 +226,8 @@ class Orm(object):
                 if self.keyProperty not in columns:
                     columns.append(self.keyProperty)
                     if isinstance(dataList[0], list):
-                        for data in dataList:
-                            data.append(self.generator())
+                        for d in dataList:
+                            d.append(self.generator())
                     else:
                         dataList.append(self.generator())
 
